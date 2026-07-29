@@ -9,7 +9,7 @@ This is the classic "price breakout on unusually high volume" setup.
 Run:
     python screener.py
     python screener.py --volume-multiple 3 --lookback 20
-    python screener.py --stocks-file mylist.txt --output today.csv
+    python screener.py --stocks-file mylist.txt --output today.xlsx
 
 Educational tool only. Not investment advice.
 """
@@ -37,7 +37,7 @@ def check_breakout(df: pd.DataFrame, vol_multiple: float = 2.5, lookback: int = 
     Open, High, Low, Close, Volume.
     """
     df = df.dropna()
-    if len(df) < lookback + 15:  # need enough history for averages + RSI
+    if len(df) <= lookback + 14:  # need enough history for averages + RSI
         return None
 
     today = df.iloc[-1]
@@ -45,7 +45,8 @@ def check_breakout(df: pd.DataFrame, vol_multiple: float = 2.5, lookback: int = 
 
     avg_volume = history["Volume"].tail(lookback).mean()
     breakout_level = history["High"].tail(lookback).max()
-    if not avg_volume or avg_volume <= 0:
+
+    if not avg_volume or avg_volume != avg_volume:
         return None
 
     volume_ratio = float(today["Volume"]) / float(avg_volume)
@@ -58,8 +59,8 @@ def check_breakout(df: pd.DataFrame, vol_multiple: float = 2.5, lookback: int = 
             "% Above Level": round((float(today["Close"]) / float(breakout_level) - 1) * 100, 2),
             "Volume": int(today["Volume"]),
             "Avg Vol (20d)": int(avg_volume),
-            "Volume x": round(volume_ratio, 1),
-            "RSI(14)": round(rsi_today, 1),
+            "Volume x": round(volume_ratio, 2),
+            "RSI(14)": round(rsi_today, 2),
         }
     return None
 
@@ -69,36 +70,31 @@ def load_symbols(path: str):
         return [
             line.strip().upper()
             for line in f
-            if line.strip() and not line.startswith("#")
+            if line.strip() and not line.strip().startswith("#")
         ]
 
 
 def main():
-    ap = argparse.ArgumentParser(description="NSE volume breakout screener")
-    ap.add_argument("--stocks-file", default="stocks.txt",
-                    help="text file with one NSE symbol per line")
-    ap.add_argument("--volume-multiple", type=float, default=2.5,
-                    help="today's volume must be >= this x 20-day average")
-    ap.add_argument("--lookback", type=int, default=20,
-                    help="days used for average volume and breakout high")
-    ap.add_argument("--output", default="breakouts.csv",
-                    help="CSV file to save results")
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser(description="NSE volume breakout screener")
+    parser.add_argument("--stocks-file", default="stocks.txt",
+                         help="text file with one NSE symbol per line")
+    parser.add_argument("--volume-multiple", type=float, default=2.5,
+                         help="today's volume must be >= this x 20-day average")
+    parser.add_argument("--lookback", type=int, default=20,
+                         help="days used for average volume and breakout high")
+    parser.add_argument("--output", default="breakouts.xlsx",
+                         help="Excel file to save results")
+    args = parser.parse_args()
 
     symbols = load_symbols(args.stocks_file)
     tickers = [s if s.endswith(".NS") else s + ".NS" for s in symbols]
+
     print(f"Scanning {len(tickers)} NSE stocks "
           f"(volume >= {args.volume_multiple}x avg, {args.lookback}-day breakout)...")
 
-    data = yf.download(
-        tickers,
-        period="6mo",
-        interval="1d",
-        group_by="ticker",
-        auto_adjust=False,
-        threads=True,
-        progress=False,
-    )
+    data = yf.download(tickers, period="6mo", interval="1d",
+                        group_by="ticker", auto_adjust=False,
+                        threads=True, progress=False)
 
     hits = {}
     for sym, ticker in zip(symbols, tickers):
@@ -111,18 +107,18 @@ def main():
             print(f"  skipped {sym}: {exc}")
 
     if not hits:
-        print("\nNo volume breakouts today with the current settings.")
+        print("No volume breakouts today with the current settings.")
         print("Tip: try --volume-multiple 2, or run after 3:30 PM market close.")
         return
 
-    table = (
-        pd.DataFrame.from_dict(hits, orient="index")
-        .sort_values("Volume x", ascending=False)
-    )
-    print(f"\n=== Volume breakouts — {datetime.now():%d-%b-%Y} ===")
+    table = pd.DataFrame.from_dict(hits, orient="index")
+    table = table.sort_values("Volume x", ascending=False)
+
+    print(f"=== Volume breakouts \u2014 {datetime.now():%d-%b-%Y} ===")
     print(table.to_string())
-    table.to_csv(args.output, index_label="Symbol")
-    print(f"\nSaved to {args.output}")
+
+    table.to_excel(args.output, index_label="Symbol")
+    print(f"Saved to {args.output}")
 
 
 if __name__ == "__main__":
