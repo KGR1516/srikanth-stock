@@ -1,23 +1,24 @@
 """NSE Volume Breakout Screener.
 
 Finds stocks where BOTH conditions are true on the latest trading day:
-  1. Volume is at least N times the 20-day average volume (default 2.5x)
-  2. Close broke above the highest high of the previous 20 days
+1. Volume is at least N times the 20-day average volume (default 2.5x)
+2. Close broke above the highest high of the previous 20 days
 
 This is the classic "price breakout on unusually high volume" setup.
 
 Run:
-    python screener.py
-    python screener.py --volume-multiple 3 --lookback 20
-    python screener.py --stocks-file mylist.txt --output today.xlsx
-    python screener.py --all-nse   # scan every NSE-listed equity instead of the curated list
+  python screener.py
+  python screener.py --volume-multiple 3 --lookback 20
+  python screener.py --stocks-file mylist.txt --output today.xlsx
+  python screener.py --all-nse   # scan every NSE-listed equity instead of the curated list
+  python screener.py --skip-delivery   # skip the extra delivery % lookup for hits
 
 Educational tool only. Not investment advice.
 """
 
 import argparse
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 import requests
@@ -83,13 +84,13 @@ def load_symbols(path: str):
         ]
 
 
-def fetch_all_nse_symbols():
-    """Download the current list of every NSE-listed equity symbol.
+def fetch_all_nse_symbols_direct():
+    """Download the current list of every NSE-listed equity symbol directly.
 
     NSE requires a browser-like session (cookies + headers) before it will
     serve this file, so we visit the homepage first to pick up cookies, then
     try each known archive domain in turn. Raises on failure so callers can
-    fall back to a static watchlist.
+    fall back to another method.
     """
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -122,6 +123,68 @@ def fetch_all_nse_symbols():
         except Exception as exc:
             last_exc = exc
     raise RuntimeError(f"could not fetch NSE equity list: {last_exc}")
+
+
+def fetch_all_nse_symbols_nsepython():
+    """Try nsepython's own NSE-session handling to get the full equity list.
+
+    nsepython manages NSE's cookie/header/bot-detection requirements
+    internally, which can be more reliable from cloud IPs (like GitHub
+    Actions) than a raw requests session. Raises on failure so callers can
+    fall back to another method.
+    """
+    from nsepython import nse_eq_symbols
+    symbols = nse_eq_symbols()
+    symbols = [str(s).strip().upper() for s in symbols if s and str(s).strip()]
+    if len(symbols) > 500:
+        return symbols
+    raise RuntimeError(f"unexpectedly short list ({len(symbols)}) from nsepython")
+
+
+def fetch_all_nse_symbols():
+    """Get every NSE-listed equity symbol, trying multiple sources in turn.
+
+    1. nsepython (handles NSE's bot-detection/session requirements itself)
+    2. Direct download from NSE's archive CSV
+    Raises only if every method fails, so the caller can fall back to a
+    static watchlist (stocks.txt).
+    """
+    try:
+        symbols = fetch_all_nse_symbols_nsepython()
+        print(f"Fetched {len(symbols)} NSE-listed equities via nsepython.")
+        return symbols
+    except Exception as exc:
+        print(f"nsepython fetch failed ({exc}); trying direct NSE archive download...")
+
+    symbols = fetch_all_nse_symbols_direct()
+    print(f"Fetched {len(symbols)} NSE-listed equities from NSE's archive CSV.")
+    return symbols
+
+
+def get_delivery_percent(symbol: str):
+    """Best-effort lookup of the latest delivery % for a symbol via nsepython.
+
+    Delivery % is the share of traded volume that actually changed hands
+    (settled into demat accounts) rather than being squared off intraday.
+    A volume breakout with high delivery % is more likely to be genuine
+    accumulation rather than a speculative intraday pump. Returns None if
+    nsepython isn't available or the lookup fails for any reason - this is
+    an optional enrichment, never required for the core breakout logic.
+    """
+    try:
+        from nsepython import equity_history
+        end = datetime.now()
+        start = end - timedelta(days=10)
+        hist = equity_history(symbol, "EQ", start.strftime("%d-%m-%Y"), end.strftime("%d-%m-%Y"))
+        if hist is None or len(hist) == 0:
+            return None
+        row = hist.iloc[-1]
+        for col in ("COP_DELIV_PERC", "CH_DELIV_PERC", "DELIV_PER", "%DlyQttoTradedQty"):
+            if col in row and row[col] not in (None, ""):
+                return round(float(row[col]), 2)
+    except Exception:
+        return None
+    return None
 
 
 def scan_batch(symbols, vol_multiple, lookback):
@@ -159,6 +222,8 @@ def main():
                          help="days used for average volume and breakout high")
     parser.add_argument("--batch-size", type=int, default=150,
                          help="how many tickers to download from Yahoo Finance at a time")
+    parser.add_argument("--skip-delivery", action="store_true",
+                         help="skip the extra delivery %% lookup for breakout hits")
     parser.add_argument("--output", default="breakouts.xlsx",
                          help="Excel file to save results")
     args = parser.parse_args()
@@ -166,7 +231,6 @@ def main():
     if args.all_nse:
         try:
             symbols = fetch_all_nse_symbols()
-            print(f"Fetched {len(symbols)} NSE-listed equities from NSE's official list.")
         except Exception as exc:
             print(f"Could not fetch the full NSE list ({exc}); falling back to {args.stocks_file}.")
             symbols = load_symbols(args.stocks_file)
@@ -190,6 +254,14 @@ def main():
 
     table = pd.DataFrame.from_dict(hits, orient="index")
     table = table.sort_values("Volume x", ascending=False)
+
+    if not args.skip_delivery:
+        print("Fetching delivery % for breakout candidates (best-effort, via nsepython)...")
+        delivery = {}
+        for sym in table.index:
+            delivery[sym] = get_delivery_percent(sym)
+            time.sleep(0.5)  # be gentle on NSE between lookups
+        table["Delivery %"] = table.index.map(delivery)
 
     print(f"=== Volume breakouts \u2014 {datetime.now():%d-%b-%Y} ===")
     print(table.to_string())
