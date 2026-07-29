@@ -21,7 +21,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run screener
-        run: python screener.py
+        run: python screener.py --all-nse
 
       - name: Email results
         env:
