@@ -23,7 +23,11 @@ import pandas as pd
 import requests
 import yfinance as yf
 
-NSE_EQUITY_LIST_URL = "https://archives.nseindia.com/content/equity/EQUITY_L.csv"
+# NSE has moved this file between domains over time; try each in order.
+NSE_EQUITY_LIST_URLS = [
+    "https://nsearchives.nseindia.com/content/equity/EQUITY_L.csv",
+    "https://archives.nseindia.com/content/equity/EQUITY_L.csv",
+]
 
 
 def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
@@ -82,20 +86,42 @@ def load_symbols(path: str):
 def fetch_all_nse_symbols():
     """Download the current list of every NSE-listed equity symbol.
 
-    Uses NSE's own published archive of listed securities. Raises on
-    failure so callers can fall back to a static watchlist.
+    NSE requires a browser-like session (cookies + headers) before it will
+    serve this file, so we visit the homepage first to pick up cookies, then
+    try each known archive domain in turn. Raises on failure so callers can
+    fall back to a static watchlist.
     """
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    resp = requests.get(NSE_EQUITY_LIST_URL, headers=headers, timeout=30)
-    resp.raise_for_status()
-    lines = resp.text.splitlines()
-    symbols = []
-    for line in lines[1:]:  # skip header row
-        parts = line.split(",")
-        symbol = parts[0].strip() if parts else ""
-        if symbol:
-            symbols.append(symbol)
-    return symbols
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    session = requests.Session()
+    session.headers.update(headers)
+    try:
+        session.get("https://www.nseindia.com", timeout=15)
+    except Exception:
+        pass  # best effort; some archive URLs work without a live cookie too
+
+    last_exc = None
+    for url in NSE_EQUITY_LIST_URLS:
+        try:
+            resp = session.get(url, timeout=30)
+            resp.raise_for_status()
+            lines = resp.text.splitlines()
+            symbols = []
+            for line in lines[1:]:  # skip header row
+                parts = line.split(",")
+                symbol = parts[0].strip() if parts else ""
+                if symbol:
+                    symbols.append(symbol)
+            if len(symbols) > 500:  # sanity check: a real listing has 1000s
+                return symbols
+            last_exc = RuntimeError(f"unexpectedly short list ({len(symbols)}) from {url}")
+        except Exception as exc:
+            last_exc = exc
+    raise RuntimeError(f"could not fetch NSE equity list: {last_exc}")
 
 
 def scan_batch(symbols, vol_multiple, lookback):
