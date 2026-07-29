@@ -10,15 +10,20 @@ Run:
     python screener.py
     python screener.py --volume-multiple 3 --lookback 20
     python screener.py --stocks-file mylist.txt --output today.xlsx
+    python screener.py --all-nse   # scan every NSE-listed equity instead of the curated list
 
 Educational tool only. Not investment advice.
 """
 
 import argparse
+import time
 from datetime import datetime
 
 import pandas as pd
+import requests
 import yfinance as yf
+
+NSE_EQUITY_LIST_URL = "https://archives.nseindia.com/content/equity/EQUITY_L.csv"
 
 
 def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
@@ -74,37 +79,83 @@ def load_symbols(path: str):
         ]
 
 
-def main():
-    parser = argparse.ArgumentParser(description="NSE volume breakout screener")
-    parser.add_argument("--stocks-file", default="stocks.txt",
-                         help="text file with one NSE symbol per line")
-    parser.add_argument("--volume-multiple", type=float, default=2.5,
-                         help="today's volume must be >= this x 20-day average")
-    parser.add_argument("--lookback", type=int, default=20,
-                         help="days used for average volume and breakout high")
-    parser.add_argument("--output", default="breakouts.xlsx",
-                         help="Excel file to save results")
-    args = parser.parse_args()
+def fetch_all_nse_symbols():
+    """Download the current list of every NSE-listed equity symbol.
 
-    symbols = load_symbols(args.stocks_file)
+    Uses NSE's own published archive of listed securities. Raises on
+    failure so callers can fall back to a static watchlist.
+    """
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    resp = requests.get(NSE_EQUITY_LIST_URL, headers=headers, timeout=30)
+    resp.raise_for_status()
+    lines = resp.text.splitlines()
+    symbols = []
+    for line in lines[1:]:  # skip header row
+        parts = line.split(",")
+        symbol = parts[0].strip() if parts else ""
+        if symbol:
+            symbols.append(symbol)
+    return symbols
+
+
+def scan_batch(symbols, vol_multiple, lookback):
+    """Download one batch of tickers and check each for a breakout."""
     tickers = [s if s.endswith(".NS") else s + ".NS" for s in symbols]
-
-    print(f"Scanning {len(tickers)} NSE stocks "
-          f"(volume >= {args.volume_multiple}x avg, {args.lookback}-day breakout)...")
-
-    data = yf.download(tickers, period="6mo", interval="1d",
-                        group_by="ticker", auto_adjust=False,
-                        threads=True, progress=False)
-
     hits = {}
+    try:
+        data = yf.download(tickers, period="6mo", interval="1d",
+                            group_by="ticker", auto_adjust=False,
+                            threads=True, progress=False)
+    except Exception as exc:
+        print(f"  batch download failed: {exc}")
+        return hits
+
     for sym, ticker in zip(symbols, tickers):
         try:
             df = data[ticker] if len(tickers) > 1 else data
-            result = check_breakout(df, args.volume_multiple, args.lookback)
+            result = check_breakout(df, vol_multiple, lookback)
             if result:
                 hits[sym] = result
         except Exception as exc:
             print(f"  skipped {sym}: {exc}")
+    return hits
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NSE volume breakout screener")
+    parser.add_argument("--stocks-file", default="stocks.txt",
+                         help="text file with one NSE symbol per line")
+    parser.add_argument("--all-nse", action="store_true",
+                         help="scan every NSE-listed equity instead of --stocks-file")
+    parser.add_argument("--volume-multiple", type=float, default=2.5,
+                         help="today's volume must be >= this x 20-day average")
+    parser.add_argument("--lookback", type=int, default=20,
+                         help="days used for average volume and breakout high")
+    parser.add_argument("--batch-size", type=int, default=150,
+                         help="how many tickers to download from Yahoo Finance at a time")
+    parser.add_argument("--output", default="breakouts.xlsx",
+                         help="Excel file to save results")
+    args = parser.parse_args()
+
+    if args.all_nse:
+        try:
+            symbols = fetch_all_nse_symbols()
+            print(f"Fetched {len(symbols)} NSE-listed equities from NSE's official list.")
+        except Exception as exc:
+            print(f"Could not fetch the full NSE list ({exc}); falling back to {args.stocks_file}.")
+            symbols = load_symbols(args.stocks_file)
+    else:
+        symbols = load_symbols(args.stocks_file)
+
+    print(f"Scanning {len(symbols)} NSE stocks "
+          f"(volume >= {args.volume_multiple}x avg, {args.lookback}-day breakout)...")
+
+    hits = {}
+    for i in range(0, len(symbols), args.batch_size):
+        batch = symbols[i:i + args.batch_size]
+        print(f"  batch {i // args.batch_size + 1}: {len(batch)} symbols...")
+        hits.update(scan_batch(batch, args.volume_multiple, args.lookback))
+        time.sleep(2)  # be gentle on Yahoo Finance between batches
 
     if not hits:
         print("No volume breakouts today with the current settings.")
