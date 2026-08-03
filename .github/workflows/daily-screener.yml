@@ -2,7 +2,7 @@ name: Daily Breakout Screener
 
 on:
   schedule:
-        - cron: '30 0 * * *'  # 06:00 IST, every day
+            - cron: '15 10 * * 1-5'  # 15:45 IST, Mon-Fri (after NSE market close)
   workflow_dispatch: {}
 
 jobs:
