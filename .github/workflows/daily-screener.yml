@@ -2,7 +2,9 @@ name: Daily Breakout Screener
 
 on:
   schedule:
-            - cron: '15 10 * * 1-5'  # 15:45 IST, Mon-Fri (after NSE market close)
+    # GitHub Actions cron runs in UTC (IST = UTC + 5:30)
+    - cron: '30 5 * * 1-5'   # 11:00 AM IST, Mon-Fri
+    - cron: '15 21 * * 0-4'  # 2:45 AM IST, Mon-Fri (21:15 UTC the previous day, Sun-Thu)
   workflow_dispatch: {}
 
 jobs:
