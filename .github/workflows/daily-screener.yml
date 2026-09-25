@@ -4,7 +4,7 @@ on:
   schedule:
     # GitHub Actions cron runs in UTC (IST = UTC + 5:30)
     - cron: '30 5 * * 1-5'   # 11:00 AM IST, Mon-Fri
-    - cron: '15 21 * * 0-4'  # 2:45 AM IST, Mon-Fri (21:15 UTC the previous day, Sun-Thu)
+    - cron: '15 9 * * 1-5'   # 2:45 PM IST, Mon-Fri
   workflow_dispatch: {}
 
 jobs:
